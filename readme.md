@@ -30,14 +30,14 @@ This repository provides a FastAPI application for analyzing calcium transients 
 
 3. **Install required packages**  
    ```bash
-   pip install fastapi uvicorn opencv-python numpy pandas scikit-image openpyxl pywavelets scipy matplotlib
+   pip install -r requirements.txt
    ```
 
 ## Usage
 
 1. **Start the FastAPI server**  
    ```bash
-   uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+   python run.py
    ```
 
 2. **Open your browser** and navigate to `http://localhost:8000/`
@@ -89,12 +89,11 @@ All results are saved in the `results/{batch_id}/` directory:
 
 ## Project Structure
 
-\`\`\`
 ├── main.py                # FastAPI application code
 ├── requirements.txt       # Pin exact package versions (optional)
 ├── static/                # Static assets (frames for ROI selection)
 ├── uploads/               # Temporary storage for uploaded videos
 ├── results/               # Output directory for batch results
 └── README.md              # This documentation
-\`\`\`
+
 
