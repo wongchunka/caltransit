@@ -20,6 +20,21 @@ import matplotlib.pyplot as plt
 
 
 # --- Configuration & Setup ---
+COLUMN_MAPPING = {
+    "video_filename": "Video Filename",
+    "beats_per_minute": "Beats per Minute",
+    "peak_to_peak_duration_ms": "Peak-to-Peak Duration (ms)",
+    "amplitude_ratio_peak_baseline": "Amplitude Ratio (Peak/Baseline)",
+    "time_to_peak_ms": "Time to Peak (ms)",
+    "time_to_50_rise_ms": "Time to 50% Rise (ms)",
+    "time_to_50_decay_ms": "Time to 50% Decay (ms)",
+    "time_to_80_decay_ms": "Time to 80% Decay (ms)",
+    "time_to_90_decay_ms": "Time to 90% Decay (ms)",
+    "time_to_max_decay_rate_ms": "Time to Max Decay Rate (ms)",
+    "max_decay_rate": "Max Decay Rate",
+    "decay_fit_r_squared": "Decay Fit R-Squared",
+}
+
 # Create directories if they don't exist
 Path("uploads").mkdir(exist_ok=True)
 Path("results").mkdir(exist_ok=True)
@@ -345,7 +360,8 @@ async def batch_roi_page(batch_id: str, file_index: int):
         prev_video_name = Path(files[file_index - 1]).stem
         latest_plot_url = f"/results/{batch_id}/{prev_video_name}_transients_plot.png"
         df = pd.DataFrame(session['results_data'])
-        combined_table_html = df.to_html(index=False, classes='results-table')
+        df_display = df.rename(columns=COLUMN_MAPPING)
+        combined_table_html = df_display.to_html(index=False, classes='results-table')
 
     return HTMLResponse(get_batch_roi_html(
         batch_id=batch_id,
@@ -448,6 +464,14 @@ async def process_video(request: Request):
         if len(peaks) < 3:
             raise ValueError("Fewer than 3 peaks were detected, cannot perform transient analysis.")
         
+        # --- Calculate BPM and Peak-to-Peak Duration ---
+        # Total duration of the signal in seconds for BPM calculation.
+        signal_duration_seconds = len(signal) / frame_rate
+        beats_per_minute = (len(peaks) / signal_duration_seconds) * 60 if signal_duration_seconds > 0 else 0
+        
+        # Mean time between peaks in milliseconds
+        mean_peak_to_peak_duration = np.mean(np.diff(peaks)) * frame_interval if len(peaks) > 1 else None
+
         # --- Transient Analysis ---
         gradient1 = np.gradient(signal)
         gradient2 = np.gradient(gradient1)
@@ -554,16 +578,18 @@ async def process_video(request: Request):
 
         # --- Summarize Results for this one video ---
         summary_dict = {
-            "VideoFilename": filename_only,
-            "Amplitude (peak/base)": np.mean(amplitudes) if amplitudes else None,
-            "TimeToPeak (ms)": np.mean(time_to_peaks) if time_to_peaks else None,
-            "Reach50 (ms)": np.mean(reach50s) if reach50s else None,
-            "Decay50 (ms)": np.mean(decay50s) if decay50s else None,
-            "Decay80 (ms)": np.mean(decay80s) if decay80s else None,
-            "Decay90 (ms)": np.mean(decay90s) if decay90s else None,
-            "TimeToMaxDecay (ms)": np.mean(times_to_max_decay) if times_to_max_decay else None,
-            "MaxDecayRate": np.mean(max_decay_rates) if max_decay_rates else None,
-            "DecayFit_R_Squared": np.mean(rate_rsqs) if rate_rsqs else None
+            "video_filename": filename_only,
+            "beats_per_minute": beats_per_minute,
+            "peak_to_peak_duration_ms": mean_peak_to_peak_duration,
+            "amplitude_ratio_peak_baseline": np.mean(amplitudes) if amplitudes else None,
+            "time_to_peak_ms": np.mean(time_to_peaks) if time_to_peaks else None,
+            "time_to_50_rise_ms": np.mean(reach50s) if reach50s else None,
+            "time_to_50_decay_ms": np.mean(decay50s) if decay50s else None,
+            "time_to_80_decay_ms": np.mean(decay80s) if decay80s else None,
+            "time_to_90_decay_ms": np.mean(decay90s) if decay90s else None,
+            "time_to_max_decay_rate_ms": np.mean(times_to_max_decay) if times_to_max_decay else None,
+            "max_decay_rate": np.mean(max_decay_rates) if max_decay_rates else None,
+            "decay_fit_r_squared": np.mean(rate_rsqs) if rate_rsqs else None
         }
         
         # Append to session results
@@ -637,7 +663,8 @@ async def results_page(folder_name: str):
     if csv_file_path.exists():
         try:
             df = pd.read_csv(csv_file_path)
-            table_html = df.to_html(index=False, classes='results-table')
+            df_display = df.rename(columns=COLUMN_MAPPING)
+            table_html = df_display.to_html(index=False, classes='results-table')
         except Exception as e:
             table_html = f"<h3>Error reading summary table: {e}</h3>"
 

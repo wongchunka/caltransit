@@ -74,18 +74,20 @@ All results are saved in the `results/{batch_id}/` directory:
 
 ### `combined_results.csv` columns
 
-| Column                  | Description                                                                                     |
-|-------------------------|-------------------------------------------------------------------------------------------------|
-| `VideoFilename`         | Base filename of the analyzed video (without extension)                                         |
-| `Amplitude (peak/base)` | Mean ratio of peak intensity over baseline                                                      |
-| `TimeToPeak (ms)`       | Average time from initiation to peak (milliseconds)                                             |
-| `Reach50 (ms)`          | Time to reach 50% of peak during rise phase (milliseconds)                                      |
-| `Decay50 (ms)`          | Time to decay to 50% of peak value (milliseconds)                                               |
-| `Decay80 (ms)`          | Time to decay to 80% of peak value (milliseconds)                                               |
-| `Decay90 (ms)`          | Time to decay to 90% of peak value (milliseconds)                                               |
-| `TimeToMaxDecay (ms)`   | Time point at which the maximal decay rate occurs (milliseconds)                                |
-| `MaxDecayRate`          | Magnitude of the maximal decay rate (intensity units per millisecond)                           |
-| `DecayFit_R_Squared`    | Coefficient of determination for the polynomial fit of the decay phase                          |
+| Column                            | Description                                                                    |
+|-----------------------------------|--------------------------------------------------------------------------------|
+| `Video Filename`                  | Base filename of the analyzed video (without extension)                        |
+| `Beats per Minute`                | The number of calcium transient peaks detected per minute.                     |
+| `Peak-to-Peak Duration (ms)`      | The average time between consecutive transient peaks in milliseconds.          |
+| `Amplitude Ratio (Peak/Baseline)` | Mean ratio of peak intensity over baseline                                     |
+| `Time to Peak (ms)`               | Average time from initiation to peak (milliseconds)                            |
+| `Time to 50% Rise (ms)`           | Time to reach 50% of peak during rise phase (milliseconds)                     |
+| `Time to 50% Decay (ms)`          | Time to decay to 50% of peak value (milliseconds)                              |
+| `Time to 80% Decay (ms)`          | Time to decay to 80% of peak value (milliseconds)                              |
+| `Time to 90% Decay (ms)`          | Time to decay to 90% of peak value (milliseconds)                              |
+| `Time to Max Decay Rate (ms)`     | Time point at which the maximal decay rate occurs (milliseconds)               |
+| `Max Decay Rate`                  | Magnitude of the maximal decay rate (intensity units per millisecond)          |
+| `Decay Fit R-Squared`             | Coefficient of determination for the polynomial fit of the decay phase         |
 
 ## Project Structure
 
