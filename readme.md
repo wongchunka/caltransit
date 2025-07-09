@@ -89,11 +89,12 @@ All results are saved in the `results/{batch_id}/` directory:
 
 ## Project Structure
 
+\`\`\`
 ├── main.py                # FastAPI application code
 ├── requirements.txt       # Pin exact package versions (optional)
 ├── static/                # Static assets (frames for ROI selection)
 ├── uploads/               # Temporary storage for uploaded videos
 ├── results/               # Output directory for batch results
 └── README.md              # This documentation
-
+\`\`\`
 
