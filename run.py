@@ -3,7 +3,6 @@ import shutil
 import uuid
 from pathlib import Path
 from typing import Optional, List, Dict
-
 import cv2
 import numpy as np
 import pandas as pd
@@ -13,11 +12,8 @@ from starlette.responses import FileResponse
 import uvicorn
 from scipy.signal import find_peaks
 from fastapi.staticfiles import StaticFiles
-# skimage, openpyxl, and pywavelets are also required.
-# You can install them with: pip install scikit-image openpyxl pywavelets
 from skimage.restoration import denoise_wavelet
 import matplotlib.pyplot as plt
-
 
 # --- Configuration & Setup ---
 COLUMN_MAPPING = {
@@ -76,6 +72,222 @@ INDEX_HTML = """
 </html>
 """
 
+def generate_activation_map(video_qc, peaks, mean_peak_to_peak_duration, frame_interval, results_path, filename_only, f=50000):
+    """
+    Generate activation map from video data.
+    
+    Parameters:
+    - video_qc: numpy array of shape (h_original, w_original, t) - video after quality control
+    - peaks: array of peak time indices
+    - mean_peak_to_peak_duration: mean duration between peaks in milliseconds
+    - frame_interval: time per frame in milliseconds
+    - results_path: path to save results
+    - filename_only: filename for saving
+    - f: number of grids (default 1000)
+    """
+    h_original, w_original, t = video_qc.shape
+    
+    # Calculate grid dimensions to approximate f total grids
+    aspect_ratio = w_original / h_original
+    h = int(np.sqrt(f / aspect_ratio))
+    w = int(f / h)
+    
+    # Ensure at least 1x1 grid
+    h = max(1, h)
+    w = max(1, w)
+    
+    print(f"Creating {w}x{h} = {w*h} grids for activation map")
+    
+    # Calculate grid sizes
+    grid_h = h_original // h
+    grid_w = w_original // w
+    
+    # Initialize arrays
+    signal_max = np.zeros((h, w))
+    signal_min = np.full((h, w), np.inf)
+    
+    # Calculate min and max signals per grid
+    for i in range(h):
+        for j in range(w):
+            # Define grid boundaries
+            start_h = i * grid_h
+            end_h = min((i + 1) * grid_h, h_original)
+            start_w = j * grid_w
+            end_w = min((j + 1) * grid_w, w_original)
+            
+            # Extract grid region across all time points
+            grid_region = video_qc[start_h:end_h, start_w:end_w, :]
+            
+            # Calculate mean signal per time point for this grid
+            mean_signals = np.mean(grid_region, axis=(0, 1))
+            
+            signal_max[i, j] = np.max(mean_signals)
+            signal_min[i, j] = np.min(mean_signals)
+    
+    # Calculate signal range
+    signal_range = signal_max - signal_min
+    
+    # Get median of signal range values
+    signal_range_median = np.median(signal_range)
+    
+    # Create mapping mask
+    mapping_mask = (signal_range >= signal_range_median).astype(int)
+    
+    # Save visualization matrices
+    plt.figure(figsize=(15, 12))
+    
+    plt.subplot(2, 3, 1)
+    plt.imshow(signal_max, cmap='viridis')
+    plt.title('Signal Max')
+    plt.colorbar()
+    
+    plt.subplot(2, 3, 2)
+    plt.imshow(signal_min, cmap='viridis')
+    plt.title('Signal Min')
+    plt.colorbar()
+    
+    plt.subplot(2, 3, 3)
+    plt.imshow(signal_range, cmap='viridis')
+    plt.title('Signal Range')
+    plt.colorbar()
+    
+    plt.subplot(2, 3, 4)
+    plt.imshow(mapping_mask, cmap='binary')
+    plt.title('Mapping Mask')
+    plt.colorbar()
+    
+    # Get peak times (need at least 3 peaks)
+    if len(peaks) < 3:
+        raise ValueError("Need at least 3 peaks for activation map generation")
+    
+    time_peak_1 = peaks[0]
+    time_peak_2 = peaks[1] 
+    time_peak_3 = peaks[2]
+    
+    # Subselect video from time_peak_1 to time_peak_2
+    video_subset = video_qc[:, :, time_peak_1:time_peak_2]
+    
+    # Calculate global intensity values in filtered grids per time point
+    global_intensities = []
+    for t_idx in range(video_subset.shape[2]):
+        frame = video_subset[:, :, t_idx]
+        filtered_intensities = []
+        
+        for i in range(h):
+            for j in range(w):
+                if mapping_mask[i, j] == 1:
+                    start_h = i * grid_h
+                    end_h = min((i + 1) * grid_h, h_original)
+                    start_w = j * grid_w
+                    end_w = min((j + 1) * grid_w, w_original)
+                    
+                    grid_region = frame[start_h:end_h, start_w:end_w]
+                    filtered_intensities.append(np.mean(grid_region))
+        
+        if filtered_intensities:
+            global_intensities.append(np.median(filtered_intensities))
+        else:
+            global_intensities.append(0)
+    
+    # Find global minimum time point
+    global_min_idx = np.argmin(global_intensities)
+    time_start = time_peak_1 + global_min_idx
+    
+    # Convert mean_peak_to_peak_duration from ms to frames
+    peak_to_peak_frames = int(mean_peak_to_peak_duration / frame_interval)
+    
+    # Identify activation time
+    time_end = min(time_start + peak_to_peak_frames, t)
+    activation_subset = video_qc[:, :, time_start:time_end]
+    
+    # Create activation map
+    activation_map = np.full((h, w), np.nan)
+    
+    for i in range(h):
+        for j in range(w):
+            if mapping_mask[i, j] == 1:
+                start_h = i * grid_h
+                end_h = min((i + 1) * grid_h, h_original)
+                start_w = j * grid_w
+                end_w = min((j + 1) * grid_w, w_original)
+                
+                # Extract grid region across activation time window
+                grid_region = activation_subset[start_h:end_h, start_w:end_w, :]
+                
+                # Calculate mean signal per time point for this grid
+                mean_signals = np.mean(grid_region, axis=(0, 1))
+                
+                # Find time of peak signal
+                peak_time_idx = np.argmax(mean_signals)
+                activation_map[i, j] = time_start + peak_time_idx
+    
+    # Add activation map to the plot
+    plt.subplot(2, 3, 5)
+    # Calculate 10% and 90% percentiles for color scale, excluding NaN values
+    valid_values = activation_map[~np.isnan(activation_map)]
+    if len(valid_values) > 0:
+        vmin = np.percentile(valid_values, 5)
+        vmax = np.percentile(valid_values, 95)
+    else:
+        vmin, vmax = None, None
+    im = plt.imshow(activation_map, cmap='jet', vmin=vmin, vmax=vmax)
+    plt.title('Activation Map')
+    plt.colorbar(im, label='Time (frames)')
+    
+    plt.tight_layout()
+    
+    # Save the combined visualization
+    viz_path = results_path / f"{filename_only}_activation_analysis.png"
+    plt.savefig(viz_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Save individual matrices as separate images
+    # Signal Max
+    plt.figure(figsize=(8, 6))
+    plt.imshow(signal_max, cmap='viridis')
+    plt.title('Signal Max')
+    plt.colorbar()
+    plt.savefig(results_path / f"{filename_only}_signal_max.jpg", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Signal Min  
+    plt.figure(figsize=(8, 6))
+    plt.imshow(signal_min, cmap='viridis')
+    plt.title('Signal Min')
+    plt.colorbar()
+    plt.savefig(results_path / f"{filename_only}_signal_min.jpg", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Signal Range
+    plt.figure(figsize=(8, 6))
+    plt.imshow(signal_range, cmap='viridis')
+    plt.title('Signal Range')
+    plt.colorbar()
+    plt.savefig(results_path / f"{filename_only}_signal_range.jpg", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Mapping Mask
+    plt.figure(figsize=(8, 6))
+    plt.imshow(mapping_mask, cmap='binary')
+    plt.title('Mapping Mask')
+    plt.colorbar()
+    plt.savefig(results_path / f"{filename_only}_mapping_mask.jpg", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Activation Map
+    plt.figure(figsize=(8, 6))
+    # Use the same percentile-based color scale for the individual activation map
+    im = plt.imshow(activation_map, cmap='jet', vmin=vmin, vmax=vmax)
+    plt.title('Activation Map')
+    plt.colorbar(im, label='Time (frames)')
+    plt.savefig(results_path / f"{filename_only}_activation_map.jpg", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Activation map analysis saved to {viz_path}")
+    print(f"Individual maps saved as JPG files")
+    
+    return activation_map, mapping_mask, signal_max, signal_min, signal_range
+
 def get_batch_roi_html(
     batch_id: str,
     file_index: int,
@@ -88,10 +300,16 @@ def get_batch_roi_html(
     
     results_so_far_html = ""
     if latest_plot_url:
+        # Also get the activation map URL for the previous video
+        prev_video_name = latest_plot_url.split('/')[-1].replace('_transients_plot.png', '')
+        latest_activation_url = f"/results/{batch_id}/{prev_video_name}_activation_map.jpg"
+        
         results_so_far_html = f"""
         <h2>Latest Result</h2>
         <p>Plot for the previously analyzed video:</p>
         <img src="{latest_plot_url}" alt="Latest transient plot" style="max-width: 80%; height: auto; border: 1px solid #ccc; padding: 5px;">
+        <p>Activation map for the previously analyzed video:</p>
+        <img src="{latest_activation_url}" alt="Latest activation map" style="max-width: 80%; height: auto; border: 1px solid #ccc; padding: 5px;">
         <h2 style="margin-top: 2em;">Combined Results So Far</h2>
         <div class="table-container">{combined_table_html}</div>
         <hr style="margin: 2em 0;">
@@ -228,7 +446,7 @@ def get_batch_roi_html(
     """
 
 
-def get_results_html(folder_name: str, files: list, plot_files: list[str], table_html: str):
+def get_results_html(folder_name: str, files: list, plot_files: list[str], activation_files: list[str], table_html: str):
     list_items = "".join(f'<li><a href="/results/{folder_name}/{f}" target="_blank">{f}</a></li>' for f in files)
 
     plots_html_content = ""
@@ -237,6 +455,13 @@ def get_results_html(folder_name: str, files: list, plot_files: list[str], table
         for plot_file in plot_files:
             plot_url = f"/results/{folder_name}/{plot_file}"
             plots_html_content += f'<div><h3 style="margin-top: 1.5em;">{plot_file}</h3><img src="{plot_url}" alt="Transient plot: {plot_file}" style="max-width: 100%; height: auto;"></div>'
+
+    activation_html_content = ""
+    if activation_files:
+        activation_html_content += "<h2>Activation Map Analysis</h2>"
+        for activation_file in activation_files:
+            activation_url = f"/results/{folder_name}/{activation_file}"
+            activation_html_content += f'<div><h3 style="margin-top: 1.5em;">{activation_file}</h3><img src="{activation_url}" alt="Activation analysis: {activation_file}" style="max-width: 100%; height: auto;"></div>'
 
 
     return f"""
@@ -276,6 +501,8 @@ def get_results_html(folder_name: str, files: list, plot_files: list[str], table
             <div class="table-container">{table_html}</div>
 
             {plots_html_content}
+
+            {activation_html_content}
     
             <div class="downloads">
                 <h2>Download Files</h2>
@@ -429,7 +656,9 @@ async def process_video(request: Request):
 
         # --- Signal Extraction ---
         raw_signal = np.zeros(frame_count_adjusted)
-        all_frames = [] # For saving video later if needed
+        
+        # Create video_qc array to store the entire video for activation map analysis
+        video_qc = np.zeros((video_height, video_width, frame_count_adjusted), dtype=np.uint8)
         
         # Skip first 5 frames
         for _ in range(5):
@@ -439,11 +668,11 @@ async def process_video(request: Request):
             ret, frame = cap.read()
             if not ret:
                 break
-            # No need to save all frames for video writing in this version
-            # if save_video_flag:
-            #     all_frames.append(frame)
             
             frame_bw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+            # Store frame in video_qc array for activation map analysis
+            video_qc[:, :, t] = frame_bw
             
             # Calculate mean intensity within the ROI
             mean_intensity = cv2.mean(frame_bw, mask=mask)[0]
@@ -576,6 +805,23 @@ async def process_video(request: Request):
                 ss_tot = np.sum((decay_signal - np.mean(decay_signal)) ** 2)
                 rate_rsqs.append(1 - (ss_res / ss_tot) if ss_tot > 0 else 1)
 
+        # --- Generate Activation Map ---
+        try:
+            print("Generating activation map...")
+            activation_map, mapping_mask, signal_max, signal_min, signal_range = generate_activation_map(
+                video_qc=video_qc,
+                peaks=peaks,
+                mean_peak_to_peak_duration=mean_peak_to_peak_duration,
+                frame_interval=frame_interval,
+                results_path=results_path,
+                filename_only=filename_only,
+                f=50000  # Default number of grids
+            )
+            print("Activation map generated successfully.")
+        except Exception as e:
+            print(f"Warning: Could not generate activation map: {str(e)}")
+            # Continue with the analysis even if activation map fails
+
         # --- Summarize Results for this one video ---
         summary_dict = {
             "video_filename": filename_only,
@@ -654,8 +900,9 @@ async def results_page(folder_name: str):
 
     files = sorted([f.name for f in results_dir.iterdir()])
 
-    # Find plots and combined CSV file
+    # Find plots, activation maps, and combined CSV file
     plot_files = [f for f in files if f.endswith("_transients_plot.png")]
+    activation_files = [f for f in files if f.endswith("_activation_map.jpg")]
     csv_file_path = results_dir / "combined_results.csv"
 
     # Read combined CSV and convert summary to HTML table
@@ -680,7 +927,7 @@ async def results_page(folder_name: str):
         del SESSIONS[folder_name]
 
 
-    return HTMLResponse(get_results_html(folder_name, files, plot_files, table_html))
+    return HTMLResponse(get_results_html(folder_name, files, plot_files, activation_files, table_html))
 
 
 @app.get("/results/{folder_name}/{file_name}")
