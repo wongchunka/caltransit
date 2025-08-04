@@ -133,7 +133,7 @@ def calculate_velocity_from_activation_map(activation_map, mapping_mask, grid_h,
     
     # Get coefficients: [a, b, c] where time = a*x + b*y + c
     coeffs = reg.coef_
-    a, b = coeffs[0], coeffs[1]  # spatial gradients
+    a, b = coeffs[0], coeffs[1]  # spatial gradients (dt/dx, dt/dy)
     
     # Calculate R-squared
     y_pred = reg.predict(X_with_intercept)
@@ -141,18 +141,20 @@ def calculate_velocity_from_activation_map(activation_map, mapping_mask, grid_h,
     ss_tot = np.sum((y - np.mean(y)) ** 2)
     r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
     
-    # Convert gradients to velocity components
-    # If activation time increases with position, velocity is in opposite direction
-    # Velocity = -gradient (since velocity = distance/time, and we have time/distance)
-    velocity_x = -a  # pixels per ms
-    velocity_y = -b  # pixels per ms
+    # The velocity magnitude is the inverse of the gradient of the activation time
+    # and points in the same direction as the gradient (from early to late activation).
+    # v = (1 / |grad(t)|^2) * grad(t), where speed is |v| = 1 / |grad(t)|.
+    grad_t_squared = a**2 + b**2
     
-    # Take absolute values as requested
-    velocity_x = abs(velocity_x)
-    velocity_y = abs(velocity_y)
+    if grad_t_squared < 1e-12:  # Avoid division by zero for a flat plane.
+        return 0.0, 0.0, 0.0, r_squared
+        
+    # Velocity components (distance/time) – signs corrected to align with propagation direction
+    velocity_x = a / grad_t_squared   # pixels/ms
+    velocity_y = b / grad_t_squared   # pixels/ms
     
-    # Calculate magnitude
-    velocity_magnitude = np.sqrt(velocity_x**2 + velocity_y**2)
+    # Velocity magnitude (speed)
+    velocity_magnitude = 1 / np.sqrt(grad_t_squared)
     
     return velocity_x, velocity_y, velocity_magnitude, r_squared
 
@@ -382,11 +384,12 @@ def generate_activation_map(video_qc, peaks, mean_peak_to_peak_duration, frame_i
         arrow_scale = min(activation_map.shape) * 0.3  # 30% of the smaller dimension
         max_velocity_component = max(abs(velocity_x), abs(velocity_y))
         if max_velocity_component > 0:
+            # Use the actual signed velocity components for arrow direction
             arrow_dx = (velocity_x / max_velocity_component) * arrow_scale
             arrow_dy = (velocity_y / max_velocity_component) * arrow_scale
             
             # Note: In image coordinates, y increases downward, so we need to flip dy
-            plt.arrow(center_x, center_y, arrow_dx, -arrow_dy, 
+            plt.arrow(center_x, center_y, arrow_dx, arrow_dy, 
                      head_width=arrow_scale*0.1, head_length=arrow_scale*0.15, 
                      fc='red', ec='red', linewidth=2, alpha=0.8)
             

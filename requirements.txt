@@ -8,3 +8,4 @@ scikit-image==0.24.0
 PyWavelets==1.6.0
 matplotlib==3.9.4
 python-multipart==0.0.20
+scikit-learn==1.6.1
