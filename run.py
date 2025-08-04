@@ -14,6 +14,7 @@ from scipy.signal import find_peaks
 from fastapi.staticfiles import StaticFiles
 from skimage.restoration import denoise_wavelet
 import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
 
 # --- Configuration & Setup ---
 COLUMN_MAPPING = {
@@ -29,6 +30,10 @@ COLUMN_MAPPING = {
     "time_to_max_decay_rate_ms": "Time to Max Decay Rate (ms)",
     "max_decay_rate": "Max Decay Rate",
     "decay_fit_r_squared": "Decay Fit R-Squared",
+    "velocity_magnitude_pixels_per_ms": "Velocity Magnitude (pixels/ms)",
+    "velocity_x_pixels_per_ms": "Velocity X (pixels/ms)",
+    "velocity_y_pixels_per_ms": "Velocity Y (pixels/ms)",
+    "velocity_r_squared": "Velocity Fit R-Squared",
 }
 
 # Create directories if they don't exist
@@ -71,6 +76,85 @@ INDEX_HTML = """
 </body>
 </html>
 """
+
+def calculate_velocity_from_activation_map(activation_map, mapping_mask, grid_h, grid_w, frame_interval):
+    """
+    Calculate overall velocity from activation map using linear regression.
+    
+    Parameters:
+    - activation_map: 2D array with activation times (in frames)
+    - mapping_mask: binary mask indicating valid regions
+    - grid_h: height of each grid cell in pixels
+    - grid_w: width of each grid cell in pixels 
+    - frame_interval: time per frame in milliseconds
+    
+    Returns:
+    - velocity_x: velocity in x direction (pixels/ms)
+    - velocity_y: velocity in y direction (pixels/ms)
+    - velocity_magnitude: overall velocity magnitude (pixels/ms)
+    - r_squared: R-squared of the linear fit
+    """
+    
+    # Get valid activation times and their spatial coordinates
+    valid_points = []
+    activation_times = []
+    
+    h, w = activation_map.shape
+    
+    for i in range(h):
+        for j in range(w):
+            if mapping_mask[i, j] == 1 and not np.isnan(activation_map[i, j]):
+                # Convert grid indices to pixel coordinates (center of each grid)
+                pixel_y = (i + 0.5) * grid_h  # Row index -> Y coordinate
+                pixel_x = (j + 0.5) * grid_w  # Column index -> X coordinate
+                activation_time_ms = activation_map[i, j] * frame_interval
+                
+                valid_points.append([pixel_x, pixel_y])
+                activation_times.append(activation_time_ms)
+    
+    if len(valid_points) < 3:
+        # Need at least 3 points for meaningful linear regression
+        return 0.0, 0.0, 0.0, 0.0
+    
+    valid_points = np.array(valid_points)
+    activation_times = np.array(activation_times)
+    
+    # Fit linear model: activation_time = a*x + b*y + c
+    # This gives us the spatial gradient of activation time
+    X = valid_points  # [x, y] coordinates
+    y = activation_times  # activation times
+    
+    # Add intercept term
+    X_with_intercept = np.column_stack([X, np.ones(len(X))])
+    
+    # Fit linear regression
+    reg = LinearRegression(fit_intercept=False)
+    reg.fit(X_with_intercept, y)
+    
+    # Get coefficients: [a, b, c] where time = a*x + b*y + c
+    coeffs = reg.coef_
+    a, b = coeffs[0], coeffs[1]  # spatial gradients
+    
+    # Calculate R-squared
+    y_pred = reg.predict(X_with_intercept)
+    ss_res = np.sum((y - y_pred) ** 2)
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
+    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+    
+    # Convert gradients to velocity components
+    # If activation time increases with position, velocity is in opposite direction
+    # Velocity = -gradient (since velocity = distance/time, and we have time/distance)
+    velocity_x = -a  # pixels per ms
+    velocity_y = -b  # pixels per ms
+    
+    # Take absolute values as requested
+    velocity_x = abs(velocity_x)
+    velocity_y = abs(velocity_y)
+    
+    # Calculate magnitude
+    velocity_magnitude = np.sqrt(velocity_x**2 + velocity_y**2)
+    
+    return velocity_x, velocity_y, velocity_magnitude, r_squared
 
 def generate_activation_map(video_qc, peaks, mean_peak_to_peak_duration, frame_interval, results_path, filename_only, f=50000):
     """
@@ -274,19 +358,69 @@ def generate_activation_map(video_qc, peaks, mean_peak_to_peak_duration, frame_i
     plt.savefig(results_path / f"{filename_only}_mapping_mask.jpg", dpi=300, bbox_inches='tight')
     plt.close()
     
-    # Activation Map
-    plt.figure(figsize=(8, 6))
+    # Calculate velocity from activation map
+    velocity_x, velocity_y, velocity_magnitude, velocity_r_squared = calculate_velocity_from_activation_map(
+        activation_map, mapping_mask, grid_h, grid_w, frame_interval
+    )
+    
+    print(f"Calculated velocity: magnitude={velocity_magnitude:.4f} pixels/ms, "
+          f"x={velocity_x:.4f}, y={velocity_y:.4f}, R²={velocity_r_squared:.4f}")
+    
+    # Activation Map with velocity arrows
+    plt.figure(figsize=(10, 8))
     # Use the same percentile-based color scale for the individual activation map
-    im = plt.imshow(activation_map, cmap='jet', vmin=vmin, vmax=vmax)
-    plt.title('Activation Map')
+    im = plt.imshow(activation_map, cmap='viridis', vmin=vmin, vmax=vmax)
+    plt.title('Activation Map with Velocity Vector')
     plt.colorbar(im, label='Time (frames)')
+    
+    # Add velocity arrow if velocity is significant
+    if velocity_magnitude > 0.001:  # Only show arrow if velocity is meaningful
+        # Calculate arrow position (center of the map)
+        center_y, center_x = activation_map.shape[0] / 2, activation_map.shape[1] / 2
+        
+        # Scale arrow length for visibility (normalize to map dimensions)
+        arrow_scale = min(activation_map.shape) * 0.3  # 30% of the smaller dimension
+        max_velocity_component = max(abs(velocity_x), abs(velocity_y))
+        if max_velocity_component > 0:
+            arrow_dx = (velocity_x / max_velocity_component) * arrow_scale
+            arrow_dy = (velocity_y / max_velocity_component) * arrow_scale
+            
+            # Note: In image coordinates, y increases downward, so we need to flip dy
+            plt.arrow(center_x, center_y, arrow_dx, -arrow_dy, 
+                     head_width=arrow_scale*0.1, head_length=arrow_scale*0.15, 
+                     fc='red', ec='red', linewidth=2, alpha=0.8)
+            
+            # Add velocity text
+            plt.text(0.02, 0.98, f'Velocity: {velocity_magnitude:.4f} pixels/ms\n'
+                                f'Vx: {velocity_x:.4f}, Vy: {velocity_y:.4f}\n'
+                                f'R²: {velocity_r_squared:.4f}',
+                    transform=plt.gca().transAxes, fontsize=10, 
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
     plt.savefig(results_path / f"{filename_only}_activation_map.jpg", dpi=300, bbox_inches='tight')
     plt.close()
     
+    # Also save velocity data to a separate CSV file
+    velocity_data = {
+        'video_filename': filename_only,
+        'velocity_magnitude_pixels_per_ms': velocity_magnitude,
+        'velocity_x_pixels_per_ms': velocity_x,
+        'velocity_y_pixels_per_ms': velocity_y,
+        'velocity_r_squared': velocity_r_squared,
+        'grid_height_pixels': grid_h,
+        'grid_width_pixels': grid_w,
+        'frame_interval_ms': frame_interval
+    }
+    
+    velocity_df = pd.DataFrame([velocity_data])
+    velocity_csv_path = results_path / f"{filename_only}_velocity_analysis.csv"
+    velocity_df.to_csv(velocity_csv_path, index=False)
+    
     print(f"Activation map analysis saved to {viz_path}")
     print(f"Individual maps saved as JPG files")
+    print(f"Velocity analysis saved to {velocity_csv_path}")
     
-    return activation_map, mapping_mask, signal_max, signal_min, signal_range
+    return activation_map, mapping_mask, signal_max, signal_min, signal_range, velocity_x, velocity_y, velocity_magnitude, velocity_r_squared
 
 def get_batch_roi_html(
     batch_id: str,
@@ -446,7 +580,7 @@ def get_batch_roi_html(
     """
 
 
-def get_results_html(folder_name: str, files: list, plot_files: list[str], activation_files: list[str], table_html: str):
+def get_results_html(folder_name: str, files: list, plot_files: list[str], activation_files: list[str], velocity_files: list[str], table_html: str):
     list_items = "".join(f'<li><a href="/results/{folder_name}/{f}" target="_blank">{f}</a></li>' for f in files)
 
     plots_html_content = ""
@@ -463,6 +597,15 @@ def get_results_html(folder_name: str, files: list, plot_files: list[str], activ
             activation_url = f"/results/{folder_name}/{activation_file}"
             activation_html_content += f'<div><h3 style="margin-top: 1.5em;">{activation_file}</h3><img src="{activation_url}" alt="Activation analysis: {activation_file}" style="max-width: 100%; height: auto;"></div>'
 
+    velocity_html_content = ""
+    if velocity_files:
+        velocity_html_content += "<h2>Velocity Analysis Files</h2>"
+        velocity_html_content += "<p>Individual velocity analysis CSV files for each video:</p>"
+        velocity_html_content += "<ul>"
+        for velocity_file in velocity_files:
+            velocity_url = f"/results/{folder_name}/{velocity_file}"
+            velocity_html_content += f'<li><a href="{velocity_url}" target="_blank">{velocity_file}</a></li>'
+        velocity_html_content += "</ul>"
 
     return f"""
     <!DOCTYPE html>
@@ -503,6 +646,8 @@ def get_results_html(folder_name: str, files: list, plot_files: list[str], activ
             {plots_html_content}
 
             {activation_html_content}
+
+            {velocity_html_content}
     
             <div class="downloads">
                 <h2>Download Files</h2>
@@ -806,9 +951,10 @@ async def process_video(request: Request):
                 rate_rsqs.append(1 - (ss_res / ss_tot) if ss_tot > 0 else 1)
 
         # --- Generate Activation Map ---
+        velocity_x, velocity_y, velocity_magnitude, velocity_r_squared = 0.0, 0.0, 0.0, 0.0
         try:
             print("Generating activation map...")
-            activation_map, mapping_mask, signal_max, signal_min, signal_range = generate_activation_map(
+            activation_map, mapping_mask, signal_max, signal_min, signal_range, velocity_x, velocity_y, velocity_magnitude, velocity_r_squared = generate_activation_map(
                 video_qc=video_qc,
                 peaks=peaks,
                 mean_peak_to_peak_duration=mean_peak_to_peak_duration,
@@ -835,7 +981,11 @@ async def process_video(request: Request):
             "time_to_90_decay_ms": np.mean(decay90s) if decay90s else None,
             "time_to_max_decay_rate_ms": np.mean(times_to_max_decay) if times_to_max_decay else None,
             "max_decay_rate": np.mean(max_decay_rates) if max_decay_rates else None,
-            "decay_fit_r_squared": np.mean(rate_rsqs) if rate_rsqs else None
+            "decay_fit_r_squared": np.mean(rate_rsqs) if rate_rsqs else None,
+            "velocity_magnitude_pixels_per_ms": velocity_magnitude,
+            "velocity_x_pixels_per_ms": velocity_x,
+            "velocity_y_pixels_per_ms": velocity_y,
+            "velocity_r_squared": velocity_r_squared
         }
         
         # Append to session results
@@ -900,9 +1050,10 @@ async def results_page(folder_name: str):
 
     files = sorted([f.name for f in results_dir.iterdir()])
 
-    # Find plots, activation maps, and combined CSV file
+    # Find plots, activation maps, velocity files, and combined CSV file
     plot_files = [f for f in files if f.endswith("_transients_plot.png")]
     activation_files = [f for f in files if f.endswith("_activation_map.jpg")]
+    velocity_files = [f for f in files if f.endswith("_velocity_analysis.csv")]
     csv_file_path = results_dir / "combined_results.csv"
 
     # Read combined CSV and convert summary to HTML table
@@ -927,7 +1078,7 @@ async def results_page(folder_name: str):
         del SESSIONS[folder_name]
 
 
-    return HTMLResponse(get_results_html(folder_name, files, plot_files, activation_files, table_html))
+    return HTMLResponse(get_results_html(folder_name, files, plot_files, activation_files, velocity_files, table_html))
 
 
 @app.get("/results/{folder_name}/{file_name}")
