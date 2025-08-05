@@ -63,15 +63,54 @@ INDEX_HTML = """
     <title>Calcium Transient Analysis</title>
     <style>
         body { font-family: sans-serif; margin: 2em; }
+        .form-group { margin: 15px 0; }
+        .checkbox-group { 
+            margin: 20px 0; 
+            padding: 15px; 
+            border: 1px solid #ddd; 
+            border-radius: 5px; 
+            background-color: #f9f9f9;
+        }
+        .checkbox-group label { 
+            display: flex; 
+            align-items: center; 
+            font-weight: normal; 
+            cursor: pointer;
+        }
+        .checkbox-group input[type="checkbox"] { 
+            margin-right: 10px; 
+            transform: scale(1.2);
+        }
+        .description { 
+            font-size: 0.9em; 
+            color: #666; 
+            margin-top: 5px; 
+            margin-left: 25px;
+        }
     </style>
 </head>
 <body>
     <h1>Calcium Transient Analysis</h1>
     <p>Upload one or more video files to begin analysis.</p>
     <form action="/upload" method="post" enctype="multipart/form-data">
-        <input type="file" name="video_files" accept=".mov,.mp4,.avi" required multiple>
-        <br><br>
-        <input type="submit" value="Upload and Proceed to ROI Selection">
+        <div class="form-group">
+            <input type="file" name="video_files" accept=".mov,.mp4,.avi" required multiple>
+        </div>
+        
+        <div class="checkbox-group">
+            <label>
+                <input type="checkbox" name="compute_activation_map" value="true" checked>
+                Compute activation maps and velocity analysis
+            </label>
+            <div class="description">
+                Generate spatial activation maps and calculate propagation velocity. 
+                Unchecking this will speed up analysis but skip spatial analysis features.
+            </div>
+        </div>
+        
+        <div class="form-group">
+            <input type="submit" value="Upload and Proceed to ROI Selection">
+        </div>
     </form>
 </body>
 </html>
@@ -393,8 +432,9 @@ def generate_activation_map(video_qc, peaks, mean_peak_to_peak_duration, frame_i
                      head_width=arrow_scale*0.1, head_length=arrow_scale*0.15, 
                      fc='red', ec='red', linewidth=2, alpha=0.8)
             
-            # Add velocity text
-            plt.text(0.02, 0.98, f'Velocity: {velocity_magnitude:.4f} pixels/ms\n'
+            # Add velocity text with filename
+            plt.text(0.02, 0.98, f'File: {filename_only}\n'
+                                f'Velocity: {velocity_magnitude:.4f} pixels/ms\n'
                                 f'Vx: {velocity_x:.4f}, Vy: {velocity_y:.4f}\n'
                                 f'R²: {velocity_r_squared:.4f}',
                     transform=plt.gca().transAxes, fontsize=10, 
@@ -431,22 +471,27 @@ def get_batch_roi_html(
     video_filename: str,
     frame_path: str,
     latest_plot_url: Optional[str],
-    combined_table_html: str
+    combined_table_html: str,
+    show_activation_maps: bool = True
 ):
     """Generates the HTML for the interactive batch processing page."""
     
     results_so_far_html = ""
     if latest_plot_url:
-        # Also get the activation map URL for the previous video
-        prev_video_name = latest_plot_url.split('/')[-1].replace('_transients_plot.png', '')
-        latest_activation_url = f"/results/{batch_id}/{prev_video_name}_activation_map.jpg"
+        # Always show the transient plot
+        activation_map_html = ""
+        if show_activation_maps:
+            # Only show activation map if user opted for it
+            prev_video_name = latest_plot_url.split('/')[-1].replace('_transients_plot.png', '')
+            latest_activation_url = f"/results/{batch_id}/{prev_video_name}_activation_map.jpg"
+            activation_map_html = f"""
+        <p>Activation map for the previously analyzed video:</p>
+        <img src="{latest_activation_url}" alt="Latest activation map" style="max-width: 80%; height: auto; border: 1px solid #ccc; padding: 5px;">"""
         
         results_so_far_html = f"""
         <h2>Latest Result</h2>
         <p>Plot for the previously analyzed video:</p>
-        <img src="{latest_plot_url}" alt="Latest transient plot" style="max-width: 80%; height: auto; border: 1px solid #ccc; padding: 5px;">
-        <p>Activation map for the previously analyzed video:</p>
-        <img src="{latest_activation_url}" alt="Latest activation map" style="max-width: 80%; height: auto; border: 1px solid #ccc; padding: 5px;">
+        <img src="{latest_plot_url}" alt="Latest transient plot" style="max-width: 80%; height: auto; border: 1px solid #ccc; padding: 5px;">{activation_map_html}
         <h2 style="margin-top: 2em;">Combined Results So Far</h2>
         <div class="table-container">{combined_table_html}</div>
         <hr style="margin: 2em 0;">
@@ -672,7 +717,8 @@ async def read_root():
 
 @app.post("/upload", response_class=HTMLResponse)
 async def handle_upload(
-    video_files: List[UploadFile] = File(...)
+    video_files: List[UploadFile] = File(...),
+    compute_activation_map: Optional[str] = Form(None)  # Form checkbox sends string or None
 ):
     batch_id = str(uuid.uuid4())
     upload_dir = Path("uploads") / batch_id
@@ -688,9 +734,13 @@ async def handle_upload(
             shutil.copyfileobj(video_file.file, buffer)
         filenames.append(video_filename)
 
+    # Convert checkbox value to boolean (checkbox sends "true" string when checked, None when unchecked)
+    should_compute_activation_map = compute_activation_map == "true"
+
     SESSIONS[batch_id] = {
         "files": filenames,
         "results_data": [],  # This will store a list of result dicts
+        "compute_activation_map": should_compute_activation_map  # Store the boolean value
     }
 
     # Redirect to the batch processing page for the first file
@@ -744,7 +794,8 @@ async def batch_roi_page(batch_id: str, file_index: int):
         video_filename=video_filename,
         frame_path=frame_path_client,
         latest_plot_url=latest_plot_url,
-        combined_table_html=combined_table_html
+        combined_table_html=combined_table_html,
+        show_activation_maps=session.get('compute_activation_map', True) # Pass the boolean value
     ))
 
 
@@ -955,21 +1006,28 @@ async def process_video(request: Request):
 
         # --- Generate Activation Map ---
         velocity_x, velocity_y, velocity_magnitude, velocity_r_squared = 0.0, 0.0, 0.0, 0.0
-        try:
-            print("Generating activation map...")
-            activation_map, mapping_mask, signal_max, signal_min, signal_range, velocity_x, velocity_y, velocity_magnitude, velocity_r_squared = generate_activation_map(
-                video_qc=video_qc,
-                peaks=peaks,
-                mean_peak_to_peak_duration=mean_peak_to_peak_duration,
-                frame_interval=frame_interval,
-                results_path=results_path,
-                filename_only=filename_only,
-                f=50000  # Default number of grids
-            )
-            print("Activation map generated successfully.")
-        except Exception as e:
-            print(f"Warning: Could not generate activation map: {str(e)}")
-            # Continue with the analysis even if activation map fails
+        
+        # Check if user wants activation map computation
+        should_compute_activation_map = session.get('compute_activation_map', True)
+        
+        if should_compute_activation_map:
+            try:
+                print("Generating activation map...")
+                activation_map, mapping_mask, signal_max, signal_min, signal_range, velocity_x, velocity_y, velocity_magnitude, velocity_r_squared = generate_activation_map(
+                    video_qc=video_qc,
+                    peaks=peaks,
+                    mean_peak_to_peak_duration=mean_peak_to_peak_duration,
+                    frame_interval=frame_interval,
+                    results_path=results_path,
+                    filename_only=filename_only,
+                    f=50000  # Default number of grids
+                )
+                print("Activation map generated successfully.")
+            except Exception as e:
+                print(f"Warning: Could not generate activation map: {str(e)}")
+                # Continue with the analysis even if activation map fails
+        else:
+            print("Skipping activation map generation as per user preference.")
 
         # --- Summarize Results for this one video ---
         summary_dict = {
